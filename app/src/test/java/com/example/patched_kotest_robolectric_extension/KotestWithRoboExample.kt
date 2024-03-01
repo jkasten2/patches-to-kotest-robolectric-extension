@@ -40,8 +40,7 @@ class ContainedRobolectricRunnerMergeApiVersionTest : ContainedRobolectricRunner
     }
 }
 
-// This test fails before patch
-//  - but will pass after our patch.
+// This test passes now (doesn't throw any more), after patches to ContainedRobolectricRunner and RobolectricExtension
 @RobolectricTest
 class ApplicationServiceTests : FunSpec({
     test("start application service with non-activity shows entry state as closed") {

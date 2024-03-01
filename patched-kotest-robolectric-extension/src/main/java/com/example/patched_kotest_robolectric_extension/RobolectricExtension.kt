@@ -1,29 +1,52 @@
 package com.example.patched_kotest_robolectric_extension
 
 import android.app.Application
+import io.kotest.common.runBlocking
 import io.kotest.core.extensions.ConstructorExtension
-import io.kotest.core.extensions.SpecExtension
+import io.kotest.core.extensions.TestCaseExtension
 import io.kotest.core.spec.AutoScan
 import io.kotest.core.spec.Spec
+import io.kotest.core.test.TestCase
+import io.kotest.core.test.TestResult
 import org.robolectric.annotation.Config
+import java.util.concurrent.Callable
 import kotlin.reflect.KClass
 import kotlin.reflect.full.findAnnotation
+import kotlin.time.Duration
 
+/**
+ * We override TestCaseExtension to configure the Robolectric environment because TestCase intercept
+ * occurs on the same thread the test is run.  This is unfortunate because it is run for every test,
+ * rather than every spec. But the SpecExtension intercept is run on a different thread.
+ */
 @AutoScan
-internal class RobolectricExtension : ConstructorExtension, SpecExtension {
+class RobolectricExtension : ConstructorExtension, TestCaseExtension {
     private fun Class<*>.getParentClass(): List<Class<*>> {
         if (superclass == null) return listOf()
         return listOf(superclass) + superclass.getParentClass()
     }
 
     private fun KClass<*>.getConfig(): Config {
-        val annotations = listOf(this.java).plus(this.java.getParentClass())
-            .mapNotNull { it.kotlin.findAnnotation<RobolectricTest>() }
-            .asSequence()
+        val configAnnotations =
+            listOf(this.java).plus(this.java.getParentClass())
+                .mapNotNull { it.kotlin.findAnnotation<Config>() }
+                .asSequence()
 
-        val application: KClass<out Application>? = annotations
-            .firstOrNull { it.application != KotestDefaultApplication::class }?.application
-        val sdk: Int? = annotations.firstOrNull { it.sdk != -1 }?.takeUnless { it.sdk == -1 }?.sdk
+        val configAnnotation = configAnnotations.firstOrNull()
+
+        if (configAnnotation != null) {
+            return Config.Builder(configAnnotation).build()
+        }
+
+        val robolectricTestAnnotations =
+            listOf(this.java).plus(this.java.getParentClass())
+                .mapNotNull { it.kotlin.findAnnotation<RobolectricTest>() }
+                .asSequence()
+
+        val application: KClass<out Application>? =
+            robolectricTestAnnotations
+                .firstOrNull { it.application != KotestDefaultApplication::class }?.application
+        val sdk: Int? = robolectricTestAnnotations.firstOrNull { it.sdk != -1 }?.takeUnless { it.sdk == -1 }?.sdk
 
         return Config.Builder()
             .also { builder ->
@@ -44,25 +67,52 @@ internal class RobolectricExtension : ConstructorExtension, SpecExtension {
             .sdkEnvironment.bootstrappedClass<Spec>(clazz.java).newInstance()
     }
 
-    override suspend fun intercept(spec: Spec, execute: suspend (Spec) -> Unit) {
-        spec::class.findAnnotation<RobolectricTest>() ?: return execute(spec)
-
-        val containedRobolectricRunner = ContainedRobolectricRunner(spec::class.getConfig())
-
-        beforeSpec(containedRobolectricRunner)
-        execute(spec)
-        afterSpec(containedRobolectricRunner)
+    override suspend fun intercept(
+        testCase: TestCase,
+        execute: suspend (TestCase) -> TestResult,
+    ): TestResult {
+        return try {
+            runTest(testCase, execute)
+        } catch (t: Throwable) {
+            // Without this the whole test class will be silently be skipped
+            // if something throws
+            TestResult.Error(Duration.ZERO, t)
+        }
     }
 
-    private fun beforeSpec(containedRobolectricRunner: ContainedRobolectricRunner) {
-        Thread.currentThread().contextClassLoader =
-            containedRobolectricRunner.sdkEnvironment.robolectricClassLoader
-        containedRobolectricRunner.containedBefore()
+    private suspend fun runTest(
+        testCase: TestCase,
+        execute: suspend (TestCase) -> TestResult,
+    ): TestResult {
+        // FIXED: Updated code based on https://github.com/kotest/kotest/issues/2717
+        val hasRobolectricAnnotation =
+            testCase.spec::class.annotations.any { annotation ->
+                annotation.annotationClass.qualifiedName == RobolectricTest::class.qualifiedName
+            }
+
+        return if (hasRobolectricAnnotation) {
+            runTestRobolectric(testCase, execute)
+        } else {
+            execute(testCase)
+        }
     }
 
-    private fun afterSpec(containedRobolectricRunner: ContainedRobolectricRunner) {
-        containedRobolectricRunner.containedAfter()
-        Thread.currentThread().contextClassLoader = RobolectricExtension::class.java.classLoader
+    private suspend fun runTestRobolectric(
+        testCase: TestCase,
+        execute: suspend (TestCase) -> TestResult,
+    ): TestResult {
+        val containedRobolectricRunner =
+            ContainedRobolectricRunner(testCase.spec::class.getConfig())
+        // sdkEnvironment.runOnMainThread is important to ensure Robolectric's
+        // looper state doesn't carry over to the next test class.
+        return containedRobolectricRunner.sdkEnvironment.runOnMainThread(
+            Callable {
+                containedRobolectricRunner.containedBefore()
+                val result = runBlocking { execute(testCase) }
+                containedRobolectricRunner.containedAfter()
+                result
+            },
+        )
     }
 }
 

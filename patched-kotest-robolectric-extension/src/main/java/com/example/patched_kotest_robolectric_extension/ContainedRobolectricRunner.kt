@@ -8,23 +8,27 @@ import org.robolectric.pluginapi.config.ConfigurationStrategy
 import org.robolectric.plugins.ConfigConfigurer
 import java.lang.reflect.Method
 
-internal class ContainedRobolectricRunner(
-    private val config: Config?
+class ContainedRobolectricRunner(
+    private val config: Config?,
 ) : RobolectricTestRunner(PlaceholderTest::class.java, injector) {
     private val placeHolderMethod: FrameworkMethod = children[0]
-    val sdkEnvironment = getSandbox(placeHolderMethod).also {
-        configureSandbox(it, placeHolderMethod)
-    }
-    private val bootStrapMethod = sdkEnvironment.bootstrappedClass<Any>(testClass.javaClass)
-        .getMethod(PlaceholderTest::bootStrapMethod.name)
+    val sdkEnvironment =
+        getSandbox(placeHolderMethod).also {
+            configureSandbox(it, placeHolderMethod)
+        }
+    private val bootStrapMethod =
+        sdkEnvironment.bootstrappedClass<Any>(testClass.javaClass)
+            .getMethod(PlaceholderTest::bootStrapMethod.name)
 
     fun containedBefore() {
+        Thread.currentThread().contextClassLoader = sdkEnvironment.robolectricClassLoader
         super.beforeTest(sdkEnvironment, placeHolderMethod, bootStrapMethod)
     }
 
     fun containedAfter() {
         super.afterTest(placeHolderMethod, bootStrapMethod)
         super.finallyAfterTest(placeHolderMethod)
+        Thread.currentThread().contextClassLoader = ContainedRobolectricRunner::class.java.classLoader
     }
 
     override fun createClassLoaderConfig(method: FrameworkMethod?): InstrumentationConfiguration {
@@ -34,8 +38,9 @@ internal class ContainedRobolectricRunner(
     }
 
     override fun getConfig(method: Method?): Config {
-        val defaultConfiguration = injector.getInstance(ConfigurationStrategy::class.java)
-            .getConfig(testClass.javaClass, method)
+        val defaultConfiguration =
+            injector.getInstance(ConfigurationStrategy::class.java)
+                .getConfig(testClass.javaClass, method)
 
         if (config != null) {
             val configConfigurer = injector.getInstance(ConfigConfigurer::class.java)
