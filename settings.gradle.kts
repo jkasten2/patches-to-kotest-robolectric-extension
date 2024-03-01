@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "patched-kotest-robolectric-extension"
 include(":app")
- 
+include(":patched-kotest-robolectric-extension")
